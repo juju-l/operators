@@ -1,4 +1,4 @@
-package main
+package helms
 
 import (
 	"context"
@@ -136,6 +136,7 @@ func (c *Controller) process(ctx context.Context) bool {
 	return true
 }
 
+// reconcile 核心逻辑（适配 Helm v4，传入 ctx）
 func (c *Controller) reconcile(ctx context.Context, key string) error {
 	ns, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -152,6 +153,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	}
 
 	hlm := obj.(*Hlm)
+	// 传入 ctx，适配 Helm v4 的 Run 方法
 	_, err = c.helmOp.InstallOrUpgrade(ctx, &hlm.Spec, c.restConfig)
 	return err
 }

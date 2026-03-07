@@ -1,21 +1,21 @@
-package main
+package helms
 
 import (
 	"bytes"
 	"context"
 	"fmt"
 
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/cli"
-	"helm.sh/helm/v3/pkg/cli/values"
-	"helm.sh/helm/v3/pkg/release"
-	"helm.sh/helm/v3/pkg/storage"
-	"helm.sh/helm/v3/pkg/storage/driver"
+	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/chart/loader"
+	"helm.sh/helm/v4/pkg/cli"
+	"helm.sh/helm/v4/pkg/cli/values"
+	"helm.sh/helm/v4/pkg/release"
+	"helm.sh/helm/v4/pkg/storage"
+	"helm.sh/helm/v4/pkg/storage/driver"
 	"k8s.io/client-go/rest"
 )
 
-// HelmOperator 封装 Helm 操作
+// HelmOperator 封装 Helm 操作（Helm v4 兼容）
 type HelmOperator struct {
 	chartPath string
 }
@@ -55,11 +55,11 @@ func (ho *HelmOperator) getActionConfig(ns string, rc *rest.Config) (*action.Con
 	return cfg, nil
 }
 
-// InstallOrUpgrade 安装或升级 Release
+// InstallOrUpgrade 安装或升级 Release（Helm v4 兼容，传入 ctx）
 func (ho *HelmOperator) InstallOrUpgrade(ctx context.Context, spec *HlmSpec, rc *rest.Config) (*release.Release, error) {
 	cfg, err := ho.getActionConfig(spec.Namespace, rc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("init action config: %w", err)
 	}
 
 	ch, err := loader.Load(ho.chartPath)
@@ -67,34 +67,46 @@ func (ho *HelmOperator) InstallOrUpgrade(ctx context.Context, spec *HlmSpec, rc 
 		return nil, fmt.Errorf("load chart: %w", err)
 	}
 
-	v, err := (&values.Options{}).MergeValues(nil, bytes.NewBufferString(spec.ValuesYAML))
+	valsOpt := &values.Options{}
+	vals, err := valsOpt.MergeValues(nil, bytes.NewBufferString(spec.ValuesYAML))
 	if err != nil {
-		return nil, fmt.Errorf("parse values: %w", err)
+		return nil, fmt.Errorf("parse valuesYAML: %w", err)
 	}
 
-	hist := action.NewHistory(cfg)
-	hist.Max = 1
-	_, err = hist.Run(spec.ReleaseName)
+	histClient := action.NewHistory(cfg)
+	histClient.Max = 1
+	_, err = histClient.Run(ctx, spec.ReleaseName)
 
+	var rel *release.Release
 	if err != nil {
-		inst := action.NewInstall(cfg)
-		inst.ReleaseName = spec.ReleaseName
-		inst.Namespace = spec.Namespace
-		inst.CreateNamespace = true
-		return inst.Run(ch, v)
+		installClient := action.NewInstall(cfg)
+		installClient.ReleaseName = spec.ReleaseName
+		installClient.Namespace = spec.Namespace
+		installClient.CreateNamespace = true
+		rel, err = installClient.Run(ctx, ch, vals)
+	} else {
+		upgradeClient := action.NewUpgrade(cfg)
+		upgradeClient.Namespace = spec.Namespace
+		rel, err = upgradeClient.Run(ctx, spec.ReleaseName, ch, vals)
 	}
 
-	up := action.NewUpgrade(cfg)
-	up.Namespace = spec.Namespace
-	return up.Run(spec.ReleaseName, ch, v)
+	if err != nil {
+		return nil, fmt.Errorf("helm install/upgrade: %w", err)
+	}
+	return rel, nil
 }
 
-// Uninstall 卸载 Release
+// Uninstall 卸载 Release（Helm v4 兼容，传入 ctx）
 func (ho *HelmOperator) Uninstall(ctx context.Context, releaseName, ns string, rc *rest.Config) error {
 	cfg, err := ho.getActionConfig(ns, rc)
 	if err != nil {
-		return err
+		return fmt.Errorf("init action config: %w", err)
 	}
-	_, err = action.NewUninstall(cfg).Run(releaseName)
-	return err
+
+	uninstallClient := action.NewUninstall(cfg)
+	_, err = uninstallClient.Run(ctx, releaseName)
+	if err != nil {
+		return fmt.Errorf("helm uninstall: %w", err)
+	}
+	return nil
 }
