@@ -8,7 +8,7 @@ operator-sdk create api --group=tpl --version=v1alpha1 --kind=DpTools `#--helm-c
 rm -rfv helm-charts
 sed -E 's,helm-charts/dptools,./helm-tpl.vipex.cc-charts,g' -i watches.yaml
 touch README.md
-echo > z.md
+echo -n >z.md
 ```
 
 
