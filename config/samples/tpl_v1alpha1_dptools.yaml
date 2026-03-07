@@ -3,7 +3,7 @@ kind: DpTools
 metadata:
   name: dptools-sample
 spec:
-  # Default values copied from <project_dir>/helm-charts/dptools/values.yaml
+  # Default values copied from <project_dir>/helm-tpl.vipex.cc-charts/values.yaml
   affinity: {}
   autoscaling:
     enabled: false
