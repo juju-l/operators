@@ -1,13 +1,12 @@
-package helms
+package main
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"sigs.k8s.io/controller-runtime/pkg/scheme"
 )
 
-// AddToScheme 注册到 client-go Scheme
-func AddToScheme(scheme *runtime.Scheme) error {
-	scheme.AddKnownTypes(SchemeGroupVersion, &Hlm{}, &HlmList{})
-	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
-	return nil
-}
+var (
+	GroupVersion = schema.GroupVersion{Group: "helm.example.com", Version: "v1"}
+	SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
+	AddToScheme = SchemeBuilder.AddToScheme
+)

@@ -1,112 +1,89 @@
-package helms
+package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-
 	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/chart"
 	"helm.sh/helm/v4/pkg/chart/loader"
 	"helm.sh/helm/v4/pkg/cli"
-	"helm.sh/helm/v4/pkg/cli/values"
-	"helm.sh/helm/v4/pkg/release"
 	"helm.sh/helm/v4/pkg/storage"
 	"helm.sh/helm/v4/pkg/storage/driver"
-	"k8s.io/client-go/rest"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	helmv1 "your/api/group/api/v1"
 )
 
-// HelmOperator 封装 Helm 操作（Helm v4 兼容）
-type HelmOperator struct {
-	chartPath string
-}
+func getActionConfig(ctx context.Context, c client.Client, namespace string) (*action.Configuration, error) {
+	restConfig := ctrl.GetConfigOrDie()
+	helmClient := cli.New()
+	helmClient.SetKubeConfig(restConfig)
 
-// NewHelmOperator 创建实例
-func NewHelmOperator(chartPath string) *HelmOperator {
-	return &HelmOperator{chartPath: chartPath}
-}
+	driver, err := driver.NewSecrets(driver.SecretsConfig{
+		Client:    c,
+		Namespace: namespace,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create secret driver: %w", err)
+	}
 
-// restConfigGetter 适配 client-go rest.Config
-type restConfigGetter struct {
-	rc *rest.Config
-}
-
-func (r *restConfigGetter) ToRESTConfig() (*rest.Config, error) {
-	return r.rc, nil
-}
-
-func (r *restConfigGetter) ToDiscoveryClient() (rest.DiscoveryInterface, error) {
-	return nil, nil
-}
-
-func (r *restConfigGetter) ToRawKubeConfigLoader() cli.EnvSettings {
-	return cli.EnvSettings{}
-}
-
-// getActionConfig 初始化 Helm action config
-func (ho *HelmOperator) getActionConfig(ns string, rc *rest.Config) (*action.Configuration, error) {
-	env := cli.New()
-	env.RESTClientGetter = &restConfigGetter{rc}
-
-	cfg := new(action.Configuration)
-	sto := storage.Init(driver.NewSecrets(rc, ns))
-
-	cfg.RESTClientGetter = env.RESTClientGetter
-	cfg.Releases = sto
+	cfg := &action.Configuration{
+		RESTClientGetter: helmClient,
+		Storage:          storage.Init(driver),
+	}
 	return cfg, nil
 }
 
-// InstallOrUpgrade 安装或升级 Release（Helm v4 兼容，传入 ctx）
-func (ho *HelmOperator) InstallOrUpgrade(ctx context.Context, spec *HlmSpec, rc *rest.Config) (*release.Release, error) {
-	cfg, err := ho.getActionConfig(spec.Namespace, rc)
+func InstallHelmChart(ctx context.Context, c client.Client, obj *helmv1.Helm) error {
+	log := log.FromContext(ctx)
+	cfg, err := getActionConfig(ctx, c, obj.Namespace)
 	if err != nil {
-		return nil, fmt.Errorf("init action config: %w", err)
+		return fmt.Errorf("action config failed: %w", err)
 	}
 
-	ch, err := loader.Load(ho.chartPath)
+	chrt, err := loader.Load(obj.Spec.Chart)
 	if err != nil {
-		return nil, fmt.Errorf("load chart: %w", err)
+		return fmt.Errorf("load chart failed: %w", err)
 	}
 
-	valsOpt := &values.Options{}
-	vals, err := valsOpt.MergeValues(nil, bytes.NewBufferString(spec.ValuesYAML))
+	install := action.NewInstall(cfg)
+	install.ReleaseName = obj.Spec.ReleaseName
+	install.Namespace = obj.Spec.Namespace
+
+	rel, err := install.Run(ctx, chrt, nil)
 	if err != nil {
-		return nil, fmt.Errorf("parse valuesYAML: %w", err)
+		return fmt.Errorf("install run failed: %w", err)
 	}
 
-	histClient := action.NewHistory(cfg)
-	histClient.Max = 1
-	_, err = histClient.Run(ctx, spec.ReleaseName)
-
-	var rel *release.Release
-	if err != nil {
-		installClient := action.NewInstall(cfg)
-		installClient.ReleaseName = spec.ReleaseName
-		installClient.Namespace = spec.Namespace
-		installClient.CreateNamespace = true
-		rel, err = installClient.Run(ctx, ch, vals)
-	} else {
-		upgradeClient := action.NewUpgrade(cfg)
-		upgradeClient.Namespace = spec.Namespace
-		rel, err = upgradeClient.Run(ctx, spec.ReleaseName, ch, vals)
-	}
-
-	if err != nil {
-		return nil, fmt.Errorf("helm install/upgrade: %w", err)
-	}
-	return rel, nil
+	log.Info("Chart installed", "release", rel.Name)
+	return nil
 }
 
-// Uninstall 卸载 Release（Helm v4 兼容，传入 ctx）
-func (ho *HelmOperator) Uninstall(ctx context.Context, releaseName, ns string, rc *rest.Config) error {
-	cfg, err := ho.getActionConfig(ns, rc)
+func UpgradeHelmChart(ctx context.Context, c client.Client, obj *helmv1.Helm) error {
+	cfg, err := getActionConfig(ctx, c, obj.Namespace)
 	if err != nil {
-		return fmt.Errorf("init action config: %w", err)
+		return fmt.Errorf("action config failed: %w", err)
 	}
 
-	uninstallClient := action.NewUninstall(cfg)
-	_, err = uninstallClient.Run(ctx, releaseName)
+	chrt, err := loader.Load(obj.Spec.Chart)
 	if err != nil {
-		return fmt.Errorf("helm uninstall: %w", err)
+		return fmt.Errorf("load chart failed: %w", err)
 	}
+
+	upgrade := action.NewUpgrade(cfg)
+	upgrade.Namespace = obj.Spec.Namespace
+
+	rel, err := upgrade.Run(ctx, obj.Spec.ReleaseName, chrt, nil)
+	if err != nil {
+		return fmt.Errorf("upgrade run failed: %w", err)
+	}
+
+	log.FromContext(ctx).Info("Chart upgraded", "release", rel.Name)
 	return nil
 }
