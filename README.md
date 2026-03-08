@@ -247,3 +247,59 @@ Hlm.Status 字段（重要）说明：
 
 如需继续扩展（生成 RBAC 与 Deployment 清单、改进 CRD schema 或实现 e2e 测试脚本），回复你想要的项，我会继续实现。
 
+
+```kind测试命令
+set -euxo pipefail
+# create kind cluster if kind is available and no clusters exist
+if command -v kind >/dev/null 2>&1; then
+  if ! kind get clusters | grep -q .; then
+    echo "No kind cluster found — creating one..."
+    kind create cluster
+  else
+    echo "Kind cluster already exists"
+  fi
+else
+  echo "kind not installed on this machine; please install kind and re-run the steps"
+fi
+
+# ensure kubectl available
+if ! command -v kubectl >/dev/null 2>&1; then
+  echo "kubectl is not installed or not in PATH" >&2
+  exit 1
+fi
+
+# apply CRD
+kubectl apply -f customResourceDefinitions.yaml
+
+# ensure target namespace exists
+kubectl create ns app07-ns || true
+
+# build operator binary
+go build -o hlm-operator .
+
+# start operator in background, log to hlm-operator.log
+KUBECONFIG_PATH="${KUBECONFIG:-$HOME/.kube/config}"
+export KUBECONFIG="$KUBECONFIG_PATH"
+PATCH_MAX_ATTEMPTS=5 PATCH_BASE_DELAY_MS=200 nohup ./hlm-operator -kubeconfig "$KUBECONFIG_PATH" -namespace default > hlm-operator.log 2>&1 &
+OP_PID=$!
+echo "Operator started with PID $OP_PID"
+
+# give operator time to start
+sleep 4
+
+# apply sample CR
+kubectl apply -f sample-hlm.yaml
+
+# wait for reconcile
+sleep 8
+
+# show CR and any rendered ConfigMaps and events
+kubectl get hlms -A -o yaml || true
+kubectl get configmaps -n default -l hlm-rendered-of=app07-hlm -o wide || true
+kubectl describe hlm app07-hlm -n default || true
+
+echo "--- operator logs (tail) ---"
+tail -n 200 hlm-operator.log || true
+
+echo "Done"
+```
