@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
+	"strings"
 
 	chartloader "helm.sh/helm/v4/pkg/chart/loader"
 	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/chart"
+	commonchart "helm.sh/helm/v4/pkg/chart/common"
+	util "helm.sh/helm/v4/pkg/chart/common/util"
 	"helm.sh/helm/v4/pkg/cli"
+	"helm.sh/helm/v4/pkg/engine"
 )
 
 // HelmClient wraps helm actions needed by the operator
@@ -74,11 +80,44 @@ func (h *HelmClient) UninstallChart(ctx context.Context, releaseName string, nam
 
 // TemplateChart renders a chart archive with given values and returns the rendered manifest
 // releaseName and namespace are used when rendering; if releaseName is empty Helm will generate one
-// Note: this is a best-effort simplified implementation which may not perform full chart templating
+// This implementation uses Helm's rendering engine via chart/common util and engine.
 func (h *HelmClient) TemplateChart(ctx context.Context, chartArchive string, vals map[string]interface{}, releaseName string, namespace string) (string, error) {
-	// For simplicity avoid relying on chart internal fields; a more complete implementation
-	// could use Helm rendering engine. Here we return an empty manifest or a placeholder.
-	return "", nil
+	ch, err := chartloader.Load(chartArchive)
+	if err != nil {
+		return "", err
+	}
+	// convert to values for rendering
+	relOpts := commonchart.ReleaseOptions{
+		Name:      releaseName,
+		Namespace: namespace,
+		Revision:  1,
+		IsInstall: true,
+	}
+	valsToRender, err := util.ToRenderValues(ch.(chart.Charter), vals, relOpts, commonchart.DefaultCapabilities)
+	if err != nil {
+		return "", err
+	}
+	eng := engine.Engine{}
+	manifests, err := eng.Render(ch.(chart.Charter), valsToRender)
+	if err != nil {
+		return "", err
+	}
+	// concatenate in sorted key order for determinism
+	keys := make([]string, 0, len(manifests))
+	for k := range manifests {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var out strings.Builder
+	for _, k := range keys {
+		m := manifests[k]
+		if strings.TrimSpace(m) == "" {
+			continue
+		}
+		out.WriteString(m)
+		out.WriteString("\n---\n")
+	}
+	return out.String(), nil
 }
 
 // RollbackChart attempts to rollback a release to its previous revision
