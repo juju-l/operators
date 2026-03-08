@@ -86,6 +86,17 @@ func (h *HelmClient) TemplateChart(ctx context.Context, chartArchive string, val
 	if err != nil {
 		return "", err
 	}
+	// build merged values: keep top-level values and also set a key named by releaseName to the same values
+	merged := map[string]interface{}{}
+	if vals != nil {
+		for k, v := range vals {
+			merged[k] = v
+		}
+	}
+	if releaseName != "" {
+		// if there's already a key with releaseName and it's not a map, we still overwrite with vals map
+		merged[releaseName] = vals
+	}
 	// convert to values for rendering
 	relOpts := commonchart.ReleaseOptions{
 		Name:      releaseName,
@@ -93,7 +104,7 @@ func (h *HelmClient) TemplateChart(ctx context.Context, chartArchive string, val
 		Revision:  1,
 		IsInstall: true,
 	}
-	valsToRender, err := util.ToRenderValues(ch.(chart.Charter), vals, relOpts, commonchart.DefaultCapabilities)
+	valsToRender, err := util.ToRenderValues(ch.(chart.Charter), merged, relOpts, commonchart.DefaultCapabilities)
 	if err != nil {
 		return "", err
 	}
