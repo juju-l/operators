@@ -1,0 +1,10 @@
+# example-hlm.yaml
+apiVersion: tpl.vipex.cc/v1alpha1
+kind: Hlm
+metadata:
+  name: example
+spec:
+  releaseName: my-app
+  namespace: default
+  valuesYAML: |
+    replicaCount: 2

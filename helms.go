@@ -3,87 +3,107 @@ package main
 import (
 	"context"
 	"fmt"
-	"helm.sh/helm/v4/pkg/action"
-	"helm.sh/helm/v4/pkg/chart"
-	"helm.sh/helm/v4/pkg/chart/loader"
-	"helm.sh/helm/v4/pkg/cli"
-	"helm.sh/helm/v4/pkg/storage"
-	"helm.sh/helm/v4/pkg/storage/driver"
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	"io"
+	"os"
 
-	helmv1 "your/api/group/api/v1"
+	chartloader "helm.sh/helm/v4/pkg/chart/loader"
+	"helm.sh/helm/v4/pkg/action"
+	"helm.sh/helm/v4/pkg/cli"
 )
 
-func getActionConfig(ctx context.Context, c client.Client, namespace string) (*action.Configuration, error) {
-	restConfig := ctrl.GetConfigOrDie()
-	helmClient := cli.New()
-	helmClient.SetKubeConfig(restConfig)
-
-	driver, err := driver.NewSecrets(driver.SecretsConfig{
-		Client:    c,
-		Namespace: namespace,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create secret driver: %w", err)
-	}
-
-	cfg := &action.Configuration{
-		RESTClientGetter: helmClient,
-		Storage:          storage.Init(driver),
-	}
-	return cfg, nil
+// HelmClient wraps helm actions needed by the operator
+type HelmClient struct {
+	cfg *action.Configuration
+	settings *cli.EnvSettings
 }
 
-func InstallHelmChart(ctx context.Context, c client.Client, obj *helmv1.Helm) error {
-	log := log.FromContext(ctx)
-	cfg, err := getActionConfig(ctx, c, obj.Namespace)
-	if err != nil {
-		return fmt.Errorf("action config failed: %w", err)
+// NewHelmClientInCluster creates a Helm client configured for in-cluster use
+func NewHelmClientInCluster(namespace string, out io.Writer) (*HelmClient, error) {
+	settings := cli.New()
+	settings.SetNamespace(namespace)
+
+	cfg := new(action.Configuration)
+	if err := cfg.Init(settings.RESTClientGetter(), namespace, os.Getenv("HELM_DRIVER"), func(format string, v ...interface{}) {
+		fmt.Fprintf(out, format, v...)
+	}); err != nil {
+		return nil, err
 	}
-
-	chrt, err := loader.Load(obj.Spec.Chart)
-	if err != nil {
-		return fmt.Errorf("load chart failed: %w", err)
-	}
-
-	install := action.NewInstall(cfg)
-	install.ReleaseName = obj.Spec.ReleaseName
-	install.Namespace = obj.Spec.Namespace
-
-	rel, err := install.Run(ctx, chrt, nil)
-	if err != nil {
-		return fmt.Errorf("install run failed: %w", err)
-	}
-
-	log.Info("Chart installed", "release", rel.Name)
-	return nil
+	return &HelmClient{cfg: cfg, settings: settings}, nil
 }
 
-func UpgradeHelmChart(ctx context.Context, c client.Client, obj *helmv1.Helm) error {
-	cfg, err := getActionConfig(ctx, c, obj.Namespace)
+// InstallOrUpgradeChart installs a chart archive (.tgz) into target namespace with given release name
+func (h *HelmClient) InstallOrUpgradeChart(ctx context.Context, chartArchive string, releaseName string, namespace string, vals map[string]interface{}) (*action.Release, error) {
+	r, err := chartloader.Load(chartArchive)
 	if err != nil {
-		return fmt.Errorf("action config failed: %w", err)
+		return nil, err
 	}
 
-	chrt, err := loader.Load(obj.Spec.Chart)
-	if err != nil {
-		return fmt.Errorf("load chart failed: %w", err)
+	// check if release exists
+	s := action.NewStatus(h.cfg)
+	if _, err := s.Run(releaseName); err == nil {
+		// release exists, do upgrade
+		u := action.NewUpgrade(h.cfg)
+		u.Namespace = namespace
+		u.ResetValues = false
+		res, err := u.Run(r, vals)
+		return res, err
 	}
 
-	upgrade := action.NewUpgrade(cfg)
-	upgrade.Namespace = obj.Spec.Namespace
+	// release not found -> install
+	i := action.NewInstall(h.cfg)
+	i.Namespace = namespace
+	i.ReleaseName = releaseName
+	res, err := i.Run(r, vals)
+	return res, err
+}
 
-	rel, err := upgrade.Run(ctx, obj.Spec.ReleaseName, chrt, nil)
+// UninstallChart uninstalls a release by name in the given namespace
+func (h *HelmClient) UninstallChart(ctx context.Context, releaseName string, namespace string) (*action.UninstallReleaseResponse, error) {
+	u := action.NewUninstall(h.cfg)
+	u.Namespace = namespace
+	res, err := u.Run(releaseName)
+	return res, err
+}
+
+// TemplateChart renders a chart archive with given values and returns the rendered manifest
+// releaseName and namespace are used when rendering; if releaseName is empty Helm will generate one
+func (h *HelmClient) TemplateChart(ctx context.Context, chartArchive string, vals map[string]interface{}, releaseName string, namespace string) (string, error) {
+	ch, err := chartloader.Load(chartArchive)
 	if err != nil {
-		return fmt.Errorf("upgrade run failed: %w", err)
+		return "", err
+	}
+	i := action.NewInstall(h.cfg)
+	i.DryRun = true
+	i.ClientOnly = true
+	if releaseName != "" {
+		i.ReleaseName = releaseName
+	}
+	if namespace != "" {
+		i.Namespace = namespace
 	}
 
-	log.FromContext(ctx).Info("Chart upgraded", "release", rel.Name)
+	res, err := i.Run(ch, vals)
+	if err != nil {
+		return "", err
+	}
+	return res.Manifest, nil
+}
+
+// ReleaseStatus checks whether a release exists and returns the release if present
+func (h *HelmClient) ReleaseStatus(ctx context.Context, releaseName string) (*action.Release, error) {
+	s := action.NewStatus(h.cfg)
+	res, err := s.Run(releaseName)
+	return res, err
+}
+
+// RollbackChart attempts to rollback a release to its previous revision
+func (h *HelmClient) RollbackChart(ctx context.Context, releaseName string, namespace string) error {
+	rb := action.NewRollback(h.cfg)
+	rb.Namespace = namespace
+	// default behaviour: wait for rollback to complete
+	rb.Wait = true
+	if err := rb.Run(releaseName); err != nil {
+		return err
+	}
 	return nil
 }

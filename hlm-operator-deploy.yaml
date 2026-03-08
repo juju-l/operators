@@ -1,0 +1,94 @@
+# HLM Operator deployment and cluster-wide RBAC
+# Edit the image field before applying
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: default
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hlm-operator-sa
+  namespace: default
+---
+# ClusterRole granting cluster-wide permissions required by operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hlm-operator-cluster-role
+rules:
+  - apiGroups: ["tpl.vipex.cc"]
+    resources: ["hlms", "hlms/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "pods", "events", "namespaces", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding to bind the SA to the ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hlm-operator-crb
+subjects:
+  - kind: ServiceAccount
+    name: hlm-operator-sa
+    namespace: default
+roleRef:
+  kind: ClusterRole
+  name: hlm-operator-cluster-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hlm-operator
+  namespace: default
+  labels:
+    app: hlm-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hlm-operator
+  template:
+    metadata:
+      labels:
+        app: hlm-operator
+    spec:
+      serviceAccountName: hlm-operator-sa
+      containers:
+        - name: hlm-operator
+          # Replace with your built image
+          image: your-registry/hlm-operator:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NAMESPACE
+              value: "default"
+            - name: PATCH_MAX_ATTEMPTS
+              value: "5"
+            - name: PATCH_BASE_DELAY_MS
+              value: "200"
+          args: ["-namespace", "default"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+# (Optional) A readme note: adjust image and namespace as needed
+# Apply with: kubectl apply -f hlm-operator-deploy.yaml
