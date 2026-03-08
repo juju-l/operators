@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 )
 
 // HlmSpec defines the desired state of Hlm
@@ -58,6 +60,17 @@ type Hlm struct {
 	Status HlmStatus `json:"status,omitempty"`
 }
 
+// DeepCopyObject implements runtime.Object
+func (in *Hlm) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	var out Hlm
+	b, _ := json.Marshal(in)
+	_ = json.Unmarshal(b, &out)
+	return &out
+}
+
 //+kubebuilder:object:root=true
 
 // HlmList contains a list of Hlm
@@ -65,4 +78,15 @@ type HlmList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Hlm `json:"items"`
+}
+
+// DeepCopyObject implements runtime.Object for HlmList
+func (in *HlmList) DeepCopyObject() runtime.Object {
+	if in == nil {
+		return nil
+	}
+	var out HlmList
+	b, _ := json.Marshal(in)
+	_ = json.Unmarshal(b, &out)
+	return &out
 }

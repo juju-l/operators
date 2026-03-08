@@ -182,7 +182,7 @@ func (c *Controller) patchStatusForObject(ctx context.Context, u *unstructured.U
 			continue
 		}
 		// If server does not support apply (method not allowed / bad request), fall back to merge patch
-		if apierrors.IsMethodNotAllowed(lastErr) || apierrors.IsBadRequest(lastErr) {
+		if isMethodNotAllowed(lastErr) || apierrors.IsBadRequest(lastErr) {
 			// prepare merge patch
 			mergeObj := map[string]interface{}{"status": sm}
 			mergeBytes, _ := json.Marshal(mergeObj)
@@ -378,8 +378,8 @@ func (c *Controller) handle(obj interface{}, eventType string) {
 	baseStatus.LastAction = "InstallOrUpgrade"
 	baseStatus.LastActionStatus = "Succeeded"
 	baseStatus.LastActionMessage = "Applied chart"
-	if res != nil {
-		baseStatus.LastRevision = res.Version
+	if res > 0 {
+		baseStatus.LastRevision = res
 	}
 	_ = c.patchStatusForObject(context.Background(), u, baseStatus)
 	c.recorder.Event(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: u.GetName()}}, corev1.EventTypeNormal, "HelmApplied", "Helm chart applied")
@@ -426,6 +426,19 @@ func (c *Controller) removeFinalizer(ctx context.Context, u *unstructured.Unstru
 	latest.SetFinalizers(newFinalizers)
 	_, err = resClient.Update(ctx, latest, metav1.UpdateOptions{})
 	return err
+}
+
+// isMethodNotAllowed checks if error is an API StatusError with HTTP code 405
+func isMethodNotAllowed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if se, ok := err.(*apierrors.StatusError); ok {
+		if se.Status().Code == 405 {
+			return true
+		}
+	}
+	return false
 }
 
 func boolPtr(b bool) *bool { return &b }
