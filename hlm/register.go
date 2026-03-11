@@ -1,54 +1,30 @@
 package hlm
 
 import (
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+ metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+ "k8s.io/apimachinery/pkg/runtime"
+ "k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// Hlm
-type Hlm struct {
-	metav1.TypeMeta   `json:",inline"`
-	metav1.ObjectMeta `json:"metadata,omitempty"`
+const GroupName = "example.com"
+const GroupVersion = "v1beta1"
 
-	Spec   HlmSpec   `json:"spec"`
-	Status HlmStatus `json:"status"`
+var SchemeGroupVersion = schema.GroupVersion{
+ Group:   GroupName,
+ Version: GroupVersion,
 }
 
-type HlmSpec struct {
-	// 你自己填字段
+var SchemeGroupVersionResource = schema.GroupVersionResource{
+ Group:    GroupName,
+ Version:  GroupVersion,
+ Resource: "hlms",
 }
 
-type HlmStatus struct {
-	Ready  bool   `json:"ready"`
-	Phase  string `json:"phase"`
-	Reason string `json:"reason,omitempty"`
-}
-
-// HlmList
-type HlmList struct {
-	metav1.TypeMeta `json:",inline"`
-	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []Hlm `json:"items"`
-}
-
-// DeepCopyObject
-func (in *Hlm) DeepCopyObject() runtime.Object {
-	out := &Hlm{}
-	out.TypeMeta = in.TypeMeta
-	out.ObjectMeta = *in.ObjectMeta.DeepCopy()
-	out.Spec = in.Spec
-	out.Status = in.Status
-	return out
-}
-
-func (in *HlmList) DeepCopyObject() runtime.Object {
-	out := &HlmList{}
-	out.TypeMeta = in.TypeMeta
-	out.ListMeta = *in.ListMeta.DeepCopy()
-	out.Items = make([]Hlm, len(in.Items))
-	for i := range in.Items {
-		in.Items[i].DeepCopyObject().(*Hlm)
-		out.Items[i] = in.Items[i]
-	}
-	return out
+func AddToScheme(scheme *runtime.Scheme) error {
+ scheme.AddKnownTypes(SchemeGroupVersion,
+ &Hlm{},
+ &HlmList{},
+ )
+ metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
+ return nil
 }
