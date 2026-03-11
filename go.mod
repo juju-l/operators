@@ -9,5 +9,5 @@ require (
 )
 
 require (
-	... // go mod tidy 会自动补全
+	//... // go mod tidy 会自动补全
 )
