@@ -1,0 +1,19 @@
+apiVersion: example.com/v1beta1
+kind: Hlm
+metadata:
+  name: my-hlm
+  namespace: default
+spec:
+  # 这里你可以随便写任何字段，CRD 已经允许未知字段
+  replicas: 3
+  image: "nginx:alpine"
+  resources:
+    cpu: "100m"
+    memory: "128Mi"
+  anyOtherField: "可以随便加"
+  a: 1
+  b:
+    c: test
+status:
+  ready: true
+  phase: Running
