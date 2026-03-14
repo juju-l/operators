@@ -4,87 +4,153 @@ import (
 	"context"
 	"flag"
 	"os"
-	"path/filepath"
+	"os/signal"
+	"syscall"
 	"time"
 
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
-
-	"tst-operator/client"
-	"tst-operator/controller"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/tools/watch"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
 )
 
 func main() {
+	klog.InitFlags(nil)
 	var kubeconfig string
-	home := os.Getenv("HOME")
-	if home != "" {
-		kubeconfig = filepath.Join(home, ".kube", "config")
-	}
-	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig, "kubeconfig path")
+	var masterURL string
+	var metricsAddr string
+	var leaderElectionNamespace string
+	var leaderElectionID string
+	var workers int
+
+	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig. Only required if out-of-cluster.")
+	flag.StringVar(&masterURL, "master", "", "The address of the Kubernetes API server. Overrides any value in kubeconfig.")
+	flag.StringVar(&metricsAddr, "metrics-addr", ":8080", "The address the metric endpoint binds to.")
+	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "default", "namespace for leader election lease")
+	flag.StringVar(&leaderElectionID, "leader-election-id", "tst-operator-lease", "id for leader election")
+	flag.IntVar(&workers, "workers", 2, "number of worker goroutines")
 	flag.Parse()
 
-	// 1. 加载 k8s 配置
-	config, err := rest.InClusterConfig()
+	// Build config
+	var cfg *rest.Config
+	var err error
+	if kubeconfig != "" {
+		cfg, err = clientcmd.BuildConfigFromFlags(masterURL, kubeconfig)
+	} else {
+		cfg, err = rest.InClusterConfig()
+	}
 	if err != nil {
-		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
-		if err != nil {
-			panic(err)
-		}
+		klog.Fatalf("failed to build kube config: %v", err)
 	}
 
-	// 2. 创建标准 kube client & 自定义 client
-	kubeClient, err := kubernetes.NewForConfig(config)
+	// Clients
+	kubeClient, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
-		panic(err)
+		klog.Fatalf("failed to create kubernetes client: %v", err)
 	}
-
-	tstClient, err := client.NewForConfig(config)
+	dynClient, err := dynamic.NewForConfig(cfg)
 	if err != nil {
-		panic(err)
+		klog.Fatalf("failed to create dynamic client: %v", err)
 	}
 
-	// 3. 创建自定义资源 informer
-	informer := client.NewTstInformer(tstClient, 10*time.Minute)
+	// Recorder placeholder
+	recorder := record.NewBroadcaster()
+	recorder.StartStructuredLogging(0)
+	_ = recorder
 
-	// 4. Leader 选举（多副本高可用）
-	podName := os.Getenv("POD_NAME")
-	if podName == "" {
-		podName = "local-run"
-	}
+	// Setup signal handler
+	stopCh := make(chan struct{})
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		close(stopCh)
+	}()
 
-	lock := &resourcelock.LeaseLock{
+	// Setup leader election
+	id, _ := os.Hostname()
+	rlConfig := resourcelock.LeaseLock{
 		LeaseMeta: metav1.ObjectMeta{
-			Name:      "tst-operator-lock",
-			Namespace: "default",
+			Name:      leaderElectionID,
+			Namespace: leaderElectionNamespace,
 		},
 		Client: kubeClient.CoordinationV1(),
 		LockConfig: resourcelock.ResourceLockConfig{
-			Identity: podName,
+			Identity: id,
 		},
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	gvr := schema.GroupVersionResource{Group: "example.com", Version: "v1beta1", Resource: "tsts"}
 
-	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
-		Lock:          lock,
+	// Leader election callbacks
+	ctx, cancel := context.WithCancel(context.Background())
+	leConfig := leaderelection.LeaderElectionConfig{
+		Lock:          &rlConfig,
 		LeaseDuration: 15 * time.Second,
 		RenewDeadline: 10 * time.Second,
 		RetryPeriod:   2 * time.Second,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
-				ctrl := controller.NewController(ctx, tstClient, informer, 3)
-				ctrl.Start()
+				klog.Info("became leader, starting controller")
+				startController(ctx, dynClient, gvr, workers)
 			},
 			OnStoppedLeading: func() {
-				os.Exit(0)
+				klog.Info("stopped leading")
+				cancel()
 			},
 			OnNewLeader: func(identity string) {
+				klog.Infof("new leader: %s", identity)
 			},
 		},
-	})
+	}
+
+	leaderelection.RunOrDie(ctx, leConfig)
+
+	<-stopCh
+	klog.Info("shutting down")
+}
+
+func startController(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, workers int) {
+	factory := informers.NewSharedInformerFactoryWithOptions(nil, 0)
+	// dynamic informer not directly via factory; use dynamicinformer in full impl
+	// ... simplified for skeleton
+
+	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "tst-controller")
+
+	// placeholder informer handlers for example
+	handleAdd := func(obj interface{}) {
+		metaObj := obj.(metav1.Object)
+		key := metaObj.GetNamespace() + "/" + metaObj.GetName()
+		queue.Add(key)
+	}
+	// ... real informer wiring omitted in skeleton
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			for {
+				item, shutdown := queue.Get()
+				if shutdown {
+					return
+				}
+				key := item.(string)
+				// process key
+				klog.Infof("processing %s", key)
+				queue.Done(item)
+				queue.Forget(item)
+			}
+		}()
+	}
+
+	<-ctx.Done()
+	queue.ShutDown()
 }

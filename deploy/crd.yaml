@@ -5,11 +5,10 @@ metadata:
 spec:
   group: example.com
   names:
-    kind: Tst
-    listKind: TstList
     plural: tsts
     singular: tst
-  scope: Namespaced # 严格按要求使用 Namespaced
+    kind: Tst
+  scope: Namespaced
   versions:
     - name: v1beta1
       served: true
@@ -20,14 +19,12 @@ spec:
           properties:
             spec:
               type: object
-              properties:
-                replicas: { type: integer }
-                image: { type: string }
             status:
               type: object
               properties:
-                readyReplicas: { type: integer }
-                state: { type: string }
-                message: { type: string }
+                observedGeneration:
+                  type: integer
+                lastHandledSpecHash:
+                  type: string
       subresources:
-        status: {} # 启用 status subresource（1.35 标准）
+        status: {}

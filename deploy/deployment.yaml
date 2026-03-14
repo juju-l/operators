@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tst-operator
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: tst-operator
+  template:
+    metadata:
+      labels:
+        app: tst-operator
+    spec:
+      serviceAccountName: tst-operator
+      containers:
+        - name: manager
+          image: your-registry/tst-operator:latest
+          command: ["/manager"]
+          args:
+            - "--leader-election-namespace=default"
+            - "--leader-election-id=tst-operator-lease"
+            - "--workers=2"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20

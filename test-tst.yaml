@@ -1,8 +1,0 @@
-apiVersion: example.com/v1beta1
-kind: Tst
-metadata:
-  name: test-tst-01
-  namespace: default
-spec:
-  replicas: 1
-  image: nginx:alpine
