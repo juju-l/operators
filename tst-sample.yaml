@@ -1,0 +1,11 @@
+apiVersion: example.com/v1beta1
+kind: Tst
+metadata:
+  name: sample-tst
+  namespace: default
+spec:
+  # 示例业务字段，请根据实际 CRD spec 调整
+  replicas: 2
+  config:
+    foo: bar
+    count: 3
