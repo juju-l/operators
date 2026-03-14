@@ -3,24 +3,22 @@ package main
 import (
 	"context"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"k8s.io/apimachinery/pkg/runtime/schema"
+	"github.com/juju-l/operators/tst-operator/controller"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/informers"
+	dynamicinformer "k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/tools/watch"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 )
 
@@ -63,11 +61,6 @@ func main() {
 		klog.Fatalf("failed to create dynamic client: %v", err)
 	}
 
-	// Recorder placeholder
-	recorder := record.NewBroadcaster()
-	recorder.StartStructuredLogging(0)
-	_ = recorder
-
 	// Setup signal handler
 	stopCh := make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
@@ -92,6 +85,16 @@ func main() {
 
 	gvr := schema.GroupVersionResource{Group: "example.com", Version: "v1beta1", Resource: "tsts"}
 
+	// Start simple health/metrics server
+	go func() {
+		http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK); w.Write([]byte("ok")) })
+		http.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK); w.Write([]byte("ready")) })
+		klog.Infof("metrics/health server listening on %s", metricsAddr)
+		if err := http.ListenAndServe(metricsAddr, nil); err != nil {
+			klog.Errorf("metrics server exited: %v", err)
+		}
+	}()
+
 	// Leader election callbacks
 	ctx, cancel := context.WithCancel(context.Background())
 	leConfig := leaderelection.LeaderElectionConfig{
@@ -102,7 +105,16 @@ func main() {
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: func(ctx context.Context) {
 				klog.Info("became leader, starting controller")
-				startController(ctx, dynClient, gvr, workers)
+
+				// dynamic informer factory
+				resync := 30 * time.Second
+				dynFactory := dynamicinformer.NewDynamicSharedInformerFactory(dynClient, resync)
+				informer := dynFactory.ForResource(gvr).Informer()
+
+				ctrl := controller.NewController(dynClient, gvr, informer)
+				// start informers + controller
+				go dynFactory.Start(ctx.Done())
+				ctrl.Run(ctx, workers)
 			},
 			OnStoppedLeading: func() {
 				klog.Info("stopped leading")
@@ -118,39 +130,4 @@ func main() {
 
 	<-stopCh
 	klog.Info("shutting down")
-}
-
-func startController(ctx context.Context, dynClient dynamic.Interface, gvr schema.GroupVersionResource, workers int) {
-	factory := informers.NewSharedInformerFactoryWithOptions(nil, 0)
-	// dynamic informer not directly via factory; use dynamicinformer in full impl
-	// ... simplified for skeleton
-
-	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "tst-controller")
-
-	// placeholder informer handlers for example
-	handleAdd := func(obj interface{}) {
-		metaObj := obj.(metav1.Object)
-		key := metaObj.GetNamespace() + "/" + metaObj.GetName()
-		queue.Add(key)
-	}
-	// ... real informer wiring omitted in skeleton
-
-	for i := 0; i < workers; i++ {
-		go func() {
-			for {
-				item, shutdown := queue.Get()
-				if shutdown {
-					return
-				}
-				key := item.(string)
-				// process key
-				klog.Infof("processing %s", key)
-				queue.Done(item)
-				queue.Forget(item)
-			}
-		}()
-	}
-
-	<-ctx.Done()
-	queue.ShutDown()
 }

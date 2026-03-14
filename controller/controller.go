@@ -9,6 +9,7 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -17,6 +18,8 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
 )
+
+// Explanation: 完善 controller，处理 unstructured 的 spec/hash 计算、变更检测、status patch 的冲突重试和上下文超时
 
 type Controller struct {
 	DynClient dynamic.Interface
@@ -36,22 +39,59 @@ func NewController(dyn dynamic.Interface, gvr schema.GroupVersionResource, infor
 
 	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			meta := obj.(metav1.Object)
-			key := meta.GetNamespace() + "/" + meta.GetName()
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				klog.Warning("add: object is not Unstructured")
+				return
+			}
+			key, err := cache.MetaNamespaceKeyFunc(u)
+			if err != nil {
+				klog.Warningf("failed to get key: %v", err)
+				return
+			}
 			c.Queue.Add(key)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			oldMeta := oldObj.(metav1.Object)
-			newMeta := newObj.(metav1.Object)
-			if oldMeta.GetResourceVersion() == newMeta.GetResourceVersion() {
+			newU, ok := newObj.(*unstructured.Unstructured)
+			if !ok {
+				klog.Warning("update: object is not Unstructured")
 				return
 			}
-			key := newMeta.GetNamespace() + "/" + newMeta.GetName()
+			oldU, ok2 := oldObj.(*unstructured.Unstructured)
+			if !ok2 {
+				klog.Warning("update: old object is not Unstructured")
+				return
+			}
+			if oldU.GetResourceVersion() == newU.GetResourceVersion() {
+				return
+			}
+			key, err := cache.MetaNamespaceKeyFunc(newU)
+			if err != nil {
+				klog.Warningf("failed to get key: %v", err)
+				return
+			}
 			c.Queue.Add(key)
 		},
 		DeleteFunc: func(obj interface{}) {
-			meta := obj.(metav1.Object)
-			key := meta.GetNamespace() + "/" + meta.GetName()
+			u, ok := obj.(*unstructured.Unstructured)
+			if !ok {
+				if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+					if t, ok2 := tombstone.Obj.(*unstructured.Unstructured); ok2 {
+						u = t
+					} else {
+						klog.Warning("delete tombstone contained non-Unstructured object")
+						return
+					}
+				} else {
+					klog.Warning("delete: object is not Unstructured")
+					return
+				}
+			}
+			key, err := cache.MetaNamespaceKeyFunc(u)
+			if err != nil {
+				klog.Warningf("failed to get key: %v", err)
+				return
+			}
 			c.Queue.Add(key)
 		},
 	})
@@ -98,10 +138,20 @@ func (c *Controller) processKey(ctx context.Context, key string) error {
 	}
 
 	res := c.DynClient.Resource(c.GVR).Namespace(ns)
+
+	// use a per-invocation timeout
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
 	obj, err := res.Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		klog.Infof("get error %v", err)
-		return nil
+		if apierrors.IsNotFound(err) {
+			klog.Infof("object %s/%s not found", ns, name)
+			return nil
+		}
+		// transient error -> requeue
+		klog.Warningf("failed to get object %s/%s: %v", ns, name, err)
+		return err
 	}
 
 	// handle deletion
@@ -112,8 +162,12 @@ func (c *Controller) processKey(ctx context.Context, key string) error {
 	}
 
 	// compute spec hash
+	var s string
 	spec, found, err := unstructured.NestedFieldCopy(obj.Object, "spec")
-	if err != nil || !found {
+	if err != nil {
+		klog.Warningf("error getting spec: %v", err)
+	}
+	if !found {
 		s = ""
 	} else {
 		b, _ := json.Marshal(spec)
@@ -134,7 +188,7 @@ func (c *Controller) processKey(ctx context.Context, key string) error {
 	// perform business logic here (create/update dependent resources)
 	klog.Infof("reconciling %s/%s", ns, name)
 
-	// update status via patch
+	// update status via patch with retry on conflict
 	patch := map[string]interface{}{
 		"status": map[string]interface{}{
 			"observedGeneration": obj.GetGeneration(),
@@ -147,11 +201,34 @@ func (c *Controller) processKey(ctx context.Context, key string) error {
 		},
 	}
 	patchBytes, _ := json.Marshal(patch)
-	_, err = res.Patch(ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{}, "status")
-	if err != nil {
-		klog.Errorf("failed patch status: %v", err)
-		return err
+
+	var lastErr error
+	for i := 0; i < 5; i++ {
+		_, err = res.Patch(ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{}, "status")
+		if err == nil {
+			klog.Infof("status patched for %s/%s", ns, name)
+			return nil
+		}
+		lastErr = err
+		klog.Warningf("failed patch status attempt %d: %v", i+1, err)
+		// on conflict, re-get and rebuild minimal patch
+		if i < 4 {
+			time.Sleep(time.Duration(i*i) * 100 * time.Millisecond)
+			newObj, gerr := res.Get(ctx, name, metav1.GetOptions{})
+			if gerr != nil {
+				klog.Warningf("failed get while retrying patch: %v", gerr)
+				continue
+			}
+			// rebuild patch to be minimal
+			patch = map[string]interface{}{
+				"status": map[string]interface{}{
+					"observedGeneration": newObj.GetGeneration(),
+					"lastHandledSpecHash": s,
+				},
+			}
+			patchBytes, _ = json.Marshal(patch)
+		}
 	}
 
-	return nil
+	return fmt.Errorf("failed to patch status after retries: %w", lastErr)
 }
