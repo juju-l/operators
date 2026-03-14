@@ -3,56 +3,88 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
+	"path/filepath"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/leaderelection/resourcelock"
+
+	"tst-operator/client"
+	"tst-operator/controller"
 )
 
 func main() {
-	kubeconfig := os.Getenv("KUBECONFIG")
-	namespace := os.Getenv("NAMESPACE")
-	if namespace == "" {
-		namespace = "default"
+	var kubeconfig string
+	home := os.Getenv("HOME")
+	if home != "" {
+		kubeconfig = filepath.Join(home, ".kube", "config")
 	}
-
-	// allow flags to override env
-	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig, "Path to kubeconfig file (optional)")
-	flag.StringVar(&namespace, "namespace", namespace, "Operator namespace")
+	flag.StringVar(&kubeconfig, "kubeconfig", kubeconfig, "kubeconfig path")
 	flag.Parse()
 
-	ctx := context.Background()
-
-	// create helm client
-	helm, err := NewHelmClientInCluster(namespace, os.Stdout)
+	// 1. 加载 k8s 配置
+	config, err := rest.InClusterConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create helm client: %v\n", err)
-		os.Exit(1)
-	}
-
-	// create controller
-	ctrl, err := NewController(kubeconfig, namespace, helm)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create controller: %v\n", err)
-		os.Exit(1)
-	}
-
-	stopCh := make(chan struct{})
-	// run controller in a goroutine
-	go func() {
-		if err := ctrl.Run(ctx, stopCh); err != nil {
-			fmt.Fprintf(os.Stderr, "controller exited with error: %v\n", err)
-			os.Exit(1)
+		config, err = clientcmd.BuildConfigFromFlags("", kubeconfig)
+		if err != nil {
+			panic(err)
 		}
-	}()
+	}
 
-	// handle signals
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
-	fmt.Println("shutting down operator...")
-	close(stopCh)
-	// give some time for shutdown
-	time.Sleep(1 * time.Second)
+	// 2. 创建标准 kube client & 自定义 client
+	kubeClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		panic(err)
+	}
+
+	tstClient, err := client.NewForConfig(config)
+	if err != nil {
+		panic(err)
+	}
+
+	// 3. 创建自定义资源 informer
+	informer := client.NewTstInformer(tstClient, 10*time.Minute)
+
+	// 4. Leader 选举（多副本高可用）
+	podName := os.Getenv("POD_NAME")
+	if podName == "" {
+		podName = "local-run"
+	}
+
+	lock := &resourcelock.LeaseLock{
+		LeaseMeta: metav1.ObjectMeta{
+			Name:      "tst-operator-lock",
+			Namespace: "default",
+		},
+		Client: kubeClient.CoordinationV1(),
+		LockConfig: resourcelock.ResourceLockConfig{
+			Identity: podName,
+		},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
+		Lock:          lock,
+		LeaseDuration: 15 * time.Second,
+		RenewDeadline: 10 * time.Second,
+		RetryPeriod:   2 * time.Second,
+		Callbacks: leaderelection.LeaderCallbacks{
+			OnStartedLeading: func(ctx context.Context) {
+				ctrl := controller.NewController(ctx, tstClient, informer, 3)
+				ctrl.Start()
+			},
+			OnStoppedLeading: func() {
+				os.Exit(0)
+			},
+			OnNewLeader: func(identity string) {
+			},
+		},
+	})
 }
