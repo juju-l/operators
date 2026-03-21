@@ -47,9 +47,9 @@ func main() {
 			}
 			ldCfg := leaderelection.LeaderElectionConfig{
 			Lock: ldLck,
-			LeaseDuration: 15 * time.Second,
-			RenewDeadline: 10 * time.Second,
-			RetryPeriod: 2 * time.Second,
+			LeaseDuration: 23 * time.Second,
+			RenewDeadline: 11 * time.Second,
+			RetryPeriod: 3 * time.Second,
 			Callbacks: kdFuc,
 			}
 
